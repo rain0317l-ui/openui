@@ -1,5 +1,7 @@
 "use client";
 
+import { DemoCreditsDialog } from "@/components/DemoCreditsDialog";
+import { isDemoCreditsErrorPayload } from "@/lib/demo-credits";
 import { mergeStatements } from "@openuidev/react-lang";
 import { Button } from "@openuidev/react-ui";
 import { encode } from "gpt-tokenizer";
@@ -25,9 +27,11 @@ import { PreviewPanel } from "./components/PreviewPanel/PreviewPanel";
 import {
   GITHUB_DEMO_MODEL_LABEL,
   GITHUB_STARTERS,
+  STREAM_RESULT,
   type ChatMessage,
   type GitHubStarterIconKey,
   type Status,
+  type StreamResult,
   type Theme,
   type ToolCallEntry,
 } from "./constants";
@@ -137,7 +141,7 @@ async function streamChat(
   onDone: () => void,
   signal?: AbortSignal,
   onFirstChunk?: () => void,
-) {
+): Promise<StreamResult> {
   const res = await fetch("/api/demo/github/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -147,11 +151,15 @@ async function streamChat(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
+    if (isDemoCreditsErrorPayload((err as { error?: unknown }).error)) {
+      return STREAM_RESULT.CreditsExhausted;
+    }
+
     onChunk(
       `Error: ${(err as { error?: { message?: string } }).error?.message ?? `Server error ${res.status}`}`,
     );
     onDone();
-    return;
+    return STREAM_RESULT.Done;
   }
 
   const reader = res.body!.getReader();
@@ -169,26 +177,31 @@ async function streamChat(
       const data = trimmed.slice(5).trim();
       if (data === "[DONE]") {
         onDone();
-        return;
+        return STREAM_RESULT.Done;
       }
+      let parsed: {
+        error?: unknown;
+        choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+      };
       try {
-        const parsed = JSON.parse(data) as {
-          choices: Array<{ delta: { content?: string } }>;
-        };
-        const content = parsed.choices[0]?.delta?.content;
-        if (content) {
-          if (!firstChunkFired) {
-            firstChunkFired = true;
-            onFirstChunk?.();
-          }
-          onChunk(content);
-        }
+        parsed = JSON.parse(data);
       } catch {
         // skip malformed chunks
+        continue;
+      }
+
+      const content = parsed.choices?.[0]?.delta?.content;
+      if (content) {
+        if (!firstChunkFired) {
+          firstChunkFired = true;
+          onFirstChunk?.();
+        }
+        onChunk(content);
       }
     }
   }
   onDone();
+  return STREAM_RESULT.Done;
 }
 
 // ── Main Page ────────────────────────────────────────────────────────────
@@ -222,6 +235,7 @@ export default function GitHubDemoPage() {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [showGitHubCreditsDialog, setShowGitHubCreditsDialog] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const responseRef = useRef("");
@@ -298,6 +312,7 @@ export default function GitHubDemoPage() {
     setShowSource(false);
     setParsedJson(null);
     setErrorMsg("");
+    setShowGitHubCreditsDialog(false);
   };
 
   // ── Send message ─────────────────────────────────────────────────────
@@ -311,6 +326,7 @@ export default function GitHubDemoPage() {
       setStartTime(null);
       setElapsed(null);
       setErrorMsg("");
+      setShowGitHubCreditsDialog(false);
       responseRef.current = "";
       setStreamingText("");
       setToolCalls([]);
@@ -353,7 +369,7 @@ export default function GitHubDemoPage() {
       abortRef.current = controller;
 
       try {
-        await streamChat(
+        const streamResult = await streamChat(
           {
             prompt: githubContext ? `${githubContext}\n\n${trimmed}` : trimmed,
             messages: apiMessages.slice(0, -1),
@@ -403,6 +419,13 @@ export default function GitHubDemoPage() {
             setStartTime(streamStartTime);
           },
         );
+
+        if (streamResult === STREAM_RESULT.CreditsExhausted) {
+          abortRef.current = null;
+          setStatus("idle");
+          setStreamResponseHasCode(false);
+          setShowGitHubCreditsDialog(true);
+        }
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "AbortError") {
           setStreamResponseHasCode(false);
@@ -707,6 +730,10 @@ export default function GitHubDemoPage() {
 
       {/* Error banner */}
       {status === "error" && errorMsg && <div className="error-banner">{errorMsg}</div>}
+      <DemoCreditsDialog
+        open={showGitHubCreditsDialog}
+        onClose={() => setShowGitHubCreditsDialog(false)}
+      />
     </div>
   );
 }

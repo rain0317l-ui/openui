@@ -280,8 +280,16 @@ export async function POST(req: NextRequest) {
   const lastUserMsg = (messages as any[]).filter((m: any) => m.role === "user").pop();
   if (lastUserMsg) conversationLog.push({ role: "user", content: extractText(lastUserMsg) });
 
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    return Response.json(
+      { error: { message: "OPENROUTER_API_KEY not configured" } },
+      { status: 500 },
+    );
+  }
+
   const client = new OpenAI({
-    apiKey: process.env.OPENROUTER_API_KEY,
+    apiKey,
     baseURL: "https://openrouter.ai/api/v1",
   });
   const MODEL = "openai/gpt-5.4";
@@ -363,6 +371,9 @@ export async function POST(req: NextRequest) {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       runner.on("chunk", (chunk: any) => {
+        // Keep credit handling to non-2xx responses. Provider-specific mid-stream
+        // chunks are intentionally ignored because they are harder to maintain
+        // across OpenRouter/OpenAI streaming shape changes.
         const choice = chunk.choices?.[0];
         const delta = choice?.delta;
         if (!delta) return;
@@ -376,6 +387,8 @@ export async function POST(req: NextRequest) {
       });
 
       runner.on("end", () => {
+        if (controllerClosed) return;
+
         conversationLog.push({ role: "assistant", content: fullResponse });
         console.info(
           "[OpenUI Lang] Conversation:\n",
@@ -391,6 +404,8 @@ export async function POST(req: NextRequest) {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       runner.on("error", (err: any) => {
+        if (controllerClosed) return;
+
         const msg = err instanceof Error ? err.message : "Stream error";
         console.error("Chat route error:", msg);
         enqueue(encoder.encode(`data: ${JSON.stringify({ error: msg })}\n\n`));
